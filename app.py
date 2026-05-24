@@ -13,6 +13,25 @@ st.set_page_config(
     layout="wide"
 )
 
+def check_password():
+    expected = st.secrets.get("PASSWORD") or os.environ.get("PASSWORD")
+    if not expected:
+        st.error("PASSWORD не задан. Добавь его в Settings → Secrets.")
+        st.stop()
+    if st.session_state.get("auth_ok"):
+        return
+    st.title("🔒 Вход")
+    pwd = st.text_input("Пароль", type="password")
+    if st.button("Войти"):
+        if pwd == expected:
+            st.session_state["auth_ok"] = True
+            st.rerun()
+        else:
+            st.error("Неверный пароль")
+    st.stop()
+
+check_password()
+
 WEBHOOK = st.secrets.get("WEBHOOK") or os.environ.get("WEBHOOK")
 if not WEBHOOK:
     st.error("WEBHOOK не задан. Добавь его в Settings → Secrets в формате: WEBHOOK = \"https://...\"")
