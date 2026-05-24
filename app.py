@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import requests
 import pandas as pd
@@ -12,7 +13,10 @@ st.set_page_config(
     layout="wide"
 )
 
-WEBHOOK = "https://b24-z45kgu.bitrix24.ru/rest/1/gbsqpsmtjgfhs0yd"
+WEBHOOK = st.secrets.get("WEBHOOK") or os.environ.get("WEBHOOK")
+if not WEBHOOK:
+    st.error("WEBHOOK не задан. Добавь его в Settings → Secrets в формате: WEBHOOK = \"https://...\"")
+    st.stop()
 
 @st.cache_data(ttl=3600)
 def b24(method, params=None):
