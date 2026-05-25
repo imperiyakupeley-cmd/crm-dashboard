@@ -556,64 +556,99 @@ with tab5:
         run_check = st.button("🔍 Запустить проверку", use_container_width=True, type="primary")
 
     if run_check:
-        with st.spinner("Проверяю дела по всем активным лидам и сделкам..."):
-            today = datetime.now()
-            threshold_dt = today + timedelta(days=5)
+        prog = st.progress(0, text="Загружаю список лидов и сделок...")
 
-            active_l = get_all('crm.lead.list', str({
-                'filter': {'!STATUS_ID': ['CONVERTED','JUNK']},
-                'select': ['ID','TITLE','ASSIGNED_BY_ID','DATE_CREATE']
-            }))
-            active_d = get_all('crm.deal.list', str({
-                'filter': {'CLOSED': 'N'},
-                'select': ['ID','TITLE','ASSIGNED_BY_ID','DATE_CREATE']
-            }))
+        today = datetime.now()
+        threshold_dt = today + timedelta(days=5)
 
-            problems = []
-            ok_count = 0
+        active_l = get_all('crm.lead.list', str({
+            'filter': {'!STATUS_ID': ['CONVERTED','JUNK']},
+            'select': ['ID','TITLE','ASSIGNED_BY_ID']
+        }))
+        active_d = get_all('crm.deal.list', str({
+            'filter': {'CLOSED': 'N'},
+            'select': ['ID','TITLE','ASSIGNED_BY_ID']
+        }))
 
-            def check_entity(eid, etype, etype_id, title, uid, created):
-                acts = b24('crm.activity.list', {
-                    'filter': {'OWNER_ID': eid, 'OWNER_TYPE_ID': etype_id, 'COMPLETED': 'N'},
-                    'select': ['ID','SUBJECT','DEADLINE']
-                })
-                manager = gu(uid)
-                if not acts or not isinstance(acts, list):
-                    return {'Тип': etype, 'ID': eid, 'Название': (title or '')[:45],
-                            'Менеджер': manager, 'Проблема': '❌ Нет дел', 'Дней': 9999}
-                nearest = None
-                for a in acts:
-                    dl = a.get('DEADLINE','')
-                    if not dl: continue
-                    try:
-                        dt = datetime.strptime(dl[:19], '%Y-%m-%dT%H:%M:%S')
-                        if nearest is None or dt < nearest:
-                            nearest = dt
-                    except: pass
-                if nearest is None:
-                    return {'Тип': etype, 'ID': eid, 'Название': (title or '')[:45],
-                            'Менеджер': manager, 'Проблема': '❌ Нет даты у дела', 'Дней': 9999}
-                days = (nearest - today).days
-                if nearest > threshold_dt:
-                    return {'Тип': etype, 'ID': eid, 'Название': (title or '')[:45],
-                            'Менеджер': manager,
-                            'Проблема': f'⏰ Дело {nearest.strftime("%d.%m.%Y")} (+{days}д)',
-                            'Дней': days}
-                return None
+        total_entities = len(active_l) + len(active_d)
+        prog.progress(10, text=f"Загружено {total_entities} записей. Проверяю дела пакетами...")
 
-            for item in active_l:
-                r = check_entity(item['ID'], 'Лид', 1, item.get('TITLE'), item.get('ASSIGNED_BY_ID'), item.get('DATE_CREATE'))
-                if r: problems.append(r)
-                else: ok_count += 1
+        # Получаем дела пакетами по 50 (batch API Б24)
+        def batch_activities(entities, etype_id):
+            acts_map = {}
+            batch_size = 50
+            items = list(entities)
+            for i in range(0, len(items), batch_size):
+                chunk = items[i:i+batch_size]
+                cmd = {}
+                for item in chunk:
+                    eid = item['ID']
+                    cmd[f"a{eid}"] = (
+                        f"crm.activity.list"
+                        f"?filter[OWNER_ID]={eid}"
+                        f"&filter[OWNER_TYPE_ID]={etype_id}"
+                        f"&filter[COMPLETED]=N"
+                        f"&select[]=DEADLINE"
+                    )
+                try:
+                    r = requests.post(f"{WEBHOOK}/batch.json",
+                                      json={"halt": 0, "cmd": cmd}, timeout=30)
+                    res = r.json().get('result', {}).get('result', {})
+                    for item in chunk:
+                        eid = item['ID']
+                        acts_map[eid] = res.get(f"a{eid}") or []
+                except Exception:
+                    for item in chunk:
+                        acts_map[item['ID']] = None
+            return acts_map
 
-            for item in active_d:
-                r = check_entity(item['ID'], 'Сделка', 2, item.get('TITLE'), item.get('ASSIGNED_BY_ID'), item.get('DATE_CREATE'))
-                if r: problems.append(r)
-                else: ok_count += 1
+        acts_leads = batch_activities(active_l, 1)
+        prog.progress(55, text="Лиды проверены, проверяю сделки...")
+        acts_deals = batch_activities(active_d, 2)
+        prog.progress(90, text="Анализирую результаты...")
 
-            total_checked = len(active_l) + len(active_d)
-            problems.sort(key=lambda x: x['Дней'], reverse=True)
-            prob_df = pd.DataFrame(problems)
+        def classify(eid, etype, title, uid, acts_map):
+            manager = gu(uid)
+            acts = acts_map.get(eid)
+            base = {'Тип': etype, 'ID': eid, 'Название': (title or '')[:45], 'Менеджер': manager}
+            if acts is None or not isinstance(acts, list):
+                return {**base, 'Проблема': '❌ Нет дел', 'Дней': 9999}
+            if not acts:
+                return {**base, 'Проблема': '❌ Нет дел', 'Дней': 9999}
+            nearest, stub = None, False
+            for a in acts:
+                dl = a.get('DEADLINE','')
+                if not dl: continue
+                try:
+                    dt = datetime.strptime(dl[:19], '%Y-%m-%dT%H:%M:%S')
+                    if dt.month == 12 and dt.day == 31: stub = True
+                    if nearest is None or dt < nearest: nearest = dt
+                except: pass
+            if nearest is None:
+                return {**base, 'Проблема': '❌ Нет даты', 'Дней': 9999}
+            days = (nearest - today).days
+            if stub:
+                return {**base, 'Проблема': f'⏰ Заглушка 31.12 (+{days}д)', 'Дней': days}
+            if nearest > threshold_dt:
+                return {**base, 'Проблема': f'⏰ Дело {nearest.strftime("%d.%m")} (+{days}д)', 'Дней': days}
+            return None
+
+        problems, ok_count = [], 0
+        for item in active_l:
+            r = classify(item['ID'], 'Лид', item.get('TITLE'), item.get('ASSIGNED_BY_ID'), acts_leads)
+            if r: problems.append(r)
+            else: ok_count += 1
+        for item in active_d:
+            r = classify(item['ID'], 'Сделка', item.get('TITLE'), item.get('ASSIGNED_BY_ID'), acts_deals)
+            if r: problems.append(r)
+            else: ok_count += 1
+
+        prog.progress(100, text="Готово!")
+        prog.empty()
+
+        total_checked = total_entities
+        problems.sort(key=lambda x: x['Дней'], reverse=True)
+        prob_df = pd.DataFrame(problems)
 
         # Результаты
         r1, r2, r3, r4 = st.columns(4)
