@@ -97,7 +97,7 @@ def load_data(date_from, date_to):
 # ─── HEADER ─────────────────────────────────────────────────────────────────
 st.title("📊 CRM Аналитика — Империя Купелей")
 
-col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
+col1, col2, col3, col4, col5 = st.columns([2, 2, 1, 2, 1])
 with col1:
     date_from = st.date_input("С", value=datetime(2026, 4, 1).date())
 with col2:
@@ -105,9 +105,28 @@ with col2:
 with col3:
     period = st.selectbox("Группировка", ["По дням", "По неделям", "По месяцам"])
 with col4:
+    rev_mode = st.selectbox("💰 Выручка считается с этапа", [
+        "В производстве и далее",
+        "Финальный счёт и далее",
+        "Только выигранные"
+    ])
+with col5:
     st.write("")
     if st.button("🔄 Обновить", use_container_width=True):
         st.cache_data.clear()
+
+# Стадии считающиеся выручкой
+_rev_stages = {
+    "В производстве и далее": {'EXECUTING','FINAL_INVOICE','WON',
+                                'C2:EXECUTING','C2:FINAL_INVOICE','C2:WON',
+                                'C4:EXECUTING','C4:FINAL_INVOICE','C4:WON',
+                                'PREPAYMENT_INVOICE','C2:PREPAYMENT_INVOICE','C4:PREPAYMENT_INVOICE'},
+    "Финальный счёт и далее": {'FINAL_INVOICE','WON',
+                                'C2:FINAL_INVOICE','C2:WON',
+                                'C4:FINAL_INVOICE','C4:WON'},
+    "Только выигранные":      {'WON','C2:WON','C4:WON'},
+}
+REVENUE_STAGES = _rev_stages[rev_mode]
 
 with st.spinner("Загружаю данные из Битрикс24..."):
     all_stages, source_names, lead_statuses = load_reference()
@@ -139,9 +158,10 @@ deals_df = pd.DataFrame([{
     'Воронка': all_stages.get(d.get('STAGE_ID',''), {}).get('category', '?'),
     'Стадия': all_stages.get(d.get('STAGE_ID',''), {}).get('name', d.get('STAGE_ID','')),
     'Сортировка': all_stages.get(d.get('STAGE_ID',''), {}).get('sort', 0),
+    'Stage_ID': d.get('STAGE_ID',''),
     'Закрыта': d.get('CLOSED') == 'Y',
     'Успешна': 'WON' in d.get('STAGE_ID',''),
-    'Провалена': 'LOSE' in d.get('STAGE_ID',''),
+    'Провалена': 'LOSE' in d.get('STAGE_ID','') or 'APOLOGY' in d.get('STAGE_ID',''),
     'Сумма': float(d.get('OPPORTUNITY') or 0),
 } for d in deals]) if deals else pd.DataFrame()
 
@@ -149,6 +169,7 @@ if not leads_df.empty:
     leads_df['Дата'] = pd.to_datetime(leads_df['Дата'])
 if not deals_df.empty:
     deals_df['Дата'] = pd.to_datetime(deals_df['Дата'])
+    deals_df['В_выручке'] = deals_df['Stage_ID'].isin(REVENUE_STAGES)
 
 total_leads = len(leads_df)
 converted = int(leads_df['Конвертирован'].sum()) if not leads_df.empty else 0
@@ -159,9 +180,10 @@ total_deals = len(deals_df)
 won = int(deals_df['Успешна'].sum()) if not deals_df.empty else 0
 lost = int(deals_df['Провалена'].sum()) if not deals_df.empty else 0
 active_deals = int((~deals_df['Закрыта']).sum()) if not deals_df.empty else 0
-revenue = deals_df[deals_df['Успешна']]['Сумма'].sum() if not deals_df.empty else 0
-avg_deal = revenue / won if won else 0
-pipeline = deals_df[~deals_df['Закрыта']]['Сумма'].sum() if not deals_df.empty else 0
+in_revenue = int(deals_df['В_выручке'].sum()) if not deals_df.empty else 0
+revenue = deals_df[deals_df['В_выручке']]['Сумма'].sum() if not deals_df.empty else 0
+avg_deal = revenue / in_revenue if in_revenue else 0
+pipeline = deals_df[~deals_df['Закрыта'] & ~deals_df['В_выручке']]['Сумма'].sum() if not deals_df.empty else 0
 
 # ─── TABS ───────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -177,8 +199,8 @@ with tab1:
     c1.metric("Лидов", total_leads)
     c2.metric("Конвертировано", f"{converted} ({conv_rate}%)")
     c3.metric("Сделок", total_deals, f"Активных: {active_deals}")
-    c4.metric("Успешных", won, f"Провалено: {lost}")
-    c5.metric("Выручка", f"{revenue:,.0f} ₽")
+    c4.metric("Выиграно", won, f"Провалено: {lost}")
+    c5.metric(f"Выручка ({rev_mode.split()[0]}…)", f"{revenue:,.0f} ₽", f"{in_revenue} сделок")
     c6.metric("Средний чек", f"{avg_deal:,.0f} ₽")
 
     st.divider()
@@ -227,8 +249,8 @@ with tab1:
         st.subheader("💰 Сделки: пайплайн")
         if not deals_df.empty:
             status_data = pd.DataFrame({
-                'Статус': ['Активных', 'Успешных', 'Провалено'],
-                'Количество': [active_deals, won, lost],
+                'Статус': ['Пайплайн', 'В выручке', 'Провалено'],
+                'Количество': [active_deals, in_revenue, lost],
                 'Сумма': [
                     pipeline,
                     revenue,
@@ -237,7 +259,7 @@ with tab1:
             })
             fig3 = px.bar(status_data, x='Статус', y='Сумма', text='Количество',
                           color='Статус',
-                          color_discrete_map={'Активных':'#2E75B6','Успешных':'#4CAF50','Провалено':'#E53935'})
+                          color_discrete_map={'Пайплайн':'#2E75B6','В выручке':'#4CAF50','Провалено':'#E53935'})
             fig3.update_traces(texttemplate='%{text} сд.', textposition='outside')
             fig3.update_layout(margin=dict(l=0,r=0,t=10,b=0), height=260, showlegend=False,
                                yaxis_title="Сумма, ₽")
@@ -390,13 +412,13 @@ with tab3:
 
             deals_by_src = deals_df.groupby('Источник').agg(
                 Сделок=('ID','count'),
-                Успешных=('Успешна','sum'),
+                Выиграно=('Успешна','sum'),
                 Провалено=('Провалена','sum'),
                 Активных=('Закрыта', lambda x: (~x).sum()),
-                Выручка=('Сумма', lambda x: deals_df.loc[x.index[deals_df.loc[x.index,'Успешна']],'Сумма'].sum()
-                         if deals_df.loc[x.index,'Успешна'].any() else 0)
+                Выручка=('Сумма', lambda x: deals_df.loc[x.index[deals_df.loc[x.index,'В_выручке']],'Сумма'].sum()
+                         if deals_df.loc[x.index,'В_выручке'].any() else 0)
             ).reset_index()
-            deals_by_src['Конверсия_в_успех_%'] = (deals_by_src['Успешных'] / deals_by_src['Сделок'] * 100).round(1)
+            deals_by_src['Конверсия_в_успех_%'] = (deals_by_src['Выиграно'] / deals_by_src['Сделок'] * 100).round(1)
 
             full_tbl = src_full.merge(deals_by_src, on='Источник', how='left').fillna(0)
             full_tbl['Выручка'] = full_tbl['Выручка'].map('{:,.0f} ₽'.format)
@@ -408,14 +430,14 @@ with tab3:
             }
             full_tbl = full_tbl.rename(columns=rename_map)
             cols_order = ['Источник','Лидов','Мусор','Мусор %','Конвертировано','Лид→Сделка %',
-                          'Сделок','Активных','Успешных','Сделка→Успех %','Провалено','Выручка']
+                          'Сделок','Активных','Выиграно','Сделка→Успех %','Провалено','Выручка']
             full_tbl = full_tbl[[c for c in cols_order if c in full_tbl.columns]]
             st.dataframe(full_tbl, use_container_width=True, hide_index=True)
 
             # ── Блок 5: Выручка по источникам ───────────────────────────
             st.divider()
             st.subheader("💰 Выручка по источникам")
-            won_deals = deals_df[deals_df['Успешна']]
+            won_deals = deals_df[deals_df['В_выручке']]
             if not won_deals.empty:
                 src_rev = (won_deals.groupby('Источник')
                            .agg(Сделок=('ID','count'), Выручка=('Сумма','sum'))
@@ -448,7 +470,7 @@ with tab4:
                 Сделок=('ID','count'),
                 Успешных=('Успешна','sum'),
                 Провалено=('Провалена','sum'),
-                Выручка=('Сумма', lambda x: deals_df.loc[x.index[deals_df.loc[x.index,'Успешна']],'Сумма'].sum() if deals_df.loc[x.index,'Успешна'].any() else 0)
+                Выручка=('Сумма', lambda x: deals_df.loc[x.index[deals_df.loc[x.index,'В_выручке']],'Сумма'].sum() if deals_df.loc[x.index,'В_выручке'].any() else 0)
             ).reset_index()
             mgr_full = mgr_leads.merge(mgr_deals, on='Менеджер', how='left').fillna(0)
         else:
