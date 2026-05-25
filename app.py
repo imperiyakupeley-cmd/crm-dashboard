@@ -551,9 +551,15 @@ with tab5:
     st.subheader("⚠️ Контроль качества дел в CRM")
     st.caption("Проверяет: есть ли у активных лидов и сделок открытые запланированные дела на ближайшие 5 дней")
 
-    col_btn, col_info = st.columns([1, 3])
+    col_btn, col_age, col_info = st.columns([1, 2, 2])
     with col_btn:
         run_check = st.button("🔍 Запустить проверку", use_container_width=True, type="primary")
+    with col_age:
+        age_filter = st.selectbox(
+            "Исключить записи старше",
+            ["Все (без ограничений)", "1 месяца", "3 месяцев", "6 месяцев", "12 месяцев"],
+            index=2
+        )
 
     if run_check:
         prog = st.progress(0, text="Загружаю список лидов и сделок...")
@@ -561,13 +567,24 @@ with tab5:
         today = datetime.now()
         threshold_dt = today + timedelta(days=5)
 
+        # Определяем дату отсечки по возрасту
+        age_map = {"1 месяца": 30, "3 месяцев": 90, "6 месяцев": 180, "12 месяцев": 365}
+        age_days = age_map.get(age_filter)
+        cutoff_str = (today - timedelta(days=age_days)).strftime('%Y-%m-%dT00:00:00') if age_days else None
+
+        lead_filter = {'!STATUS_ID': ['CONVERTED','JUNK']}
+        deal_filter = {'CLOSED': 'N'}
+        if cutoff_str:
+            lead_filter['>=DATE_CREATE'] = cutoff_str
+            deal_filter['>=DATE_CREATE'] = cutoff_str
+
         active_l = get_all('crm.lead.list', str({
-            'filter': {'!STATUS_ID': ['CONVERTED','JUNK']},
-            'select': ['ID','TITLE','ASSIGNED_BY_ID']
+            'filter': lead_filter,
+            'select': ['ID','TITLE','ASSIGNED_BY_ID','DATE_CREATE']
         }))
         active_d = get_all('crm.deal.list', str({
-            'filter': {'CLOSED': 'N'},
-            'select': ['ID','TITLE','ASSIGNED_BY_ID']
+            'filter': deal_filter,
+            'select': ['ID','TITLE','ASSIGNED_BY_ID','DATE_CREATE']
         }))
 
         total_entities = len(active_l) + len(active_d)
