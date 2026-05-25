@@ -291,58 +291,141 @@ with tab3:
     if leads_df.empty:
         st.info("Нет данных за выбранный период")
     else:
+        # ── Блок 1: Лиды по источникам ──────────────────────────────────
         st.subheader("📍 Лиды по источникам")
         src = (leads_df.groupby('Источник')
                .agg(Лидов=('ID','count'),
                     Конвертировано=('Конвертирован','sum'),
+                    Мусор=('Мусор','sum'),
                     Сумма_лидов=('Сумма','sum'))
                .reset_index())
-        src['Конверсия %'] = (src['Конвертировано'] / src['Лидов'] * 100).round(1)
+        src['Конверсия_в_сделку_%'] = (src['Конвертировано'] / src['Лидов'] * 100).round(1)
+        src['Мусор_%'] = (src['Мусор'] / src['Лидов'] * 100).round(1)
         src = src.sort_values('Лидов', ascending=False)
 
         col_a, col_b = st.columns(2)
         with col_a:
             fig = px.bar(src, x='Лидов', y='Источник', orientation='h',
-                         color='Конверсия %', color_continuous_scale='Blues',
+                         color='Конверсия_в_сделку_%', color_continuous_scale='Blues',
                          text='Лидов')
             fig.update_traces(textposition='outside')
-            fig.update_layout(margin=dict(l=0,r=0,t=10,b=0), height=340)
+            fig.update_layout(margin=dict(l=0,r=0,t=10,b=0), height=360,
+                               title="Лидов по источнику")
             st.plotly_chart(fig, use_container_width=True)
 
         with col_b:
-            fig2 = px.bar(src, x='Конверсия %', y='Источник', orientation='h',
-                          color='Конверсия %', color_continuous_scale='Greens',
-                          text='Конверсия %')
+            fig2 = px.bar(src, x='Конверсия_в_сделку_%', y='Источник', orientation='h',
+                          color='Конверсия_в_сделку_%', color_continuous_scale='Greens',
+                          text='Конверсия_в_сделку_%')
             fig2.update_traces(texttemplate='%{text}%', textposition='outside')
-            fig2.update_layout(margin=dict(l=0,r=0,t=10,b=0), height=340,
+            fig2.update_layout(margin=dict(l=0,r=0,t=10,b=0), height=360,
                                title="Конверсия лид → сделка, %")
             st.plotly_chart(fig2, use_container_width=True)
 
         st.divider()
 
         if not deals_df.empty:
-            st.subheader("💰 Выручка по источникам (успешные сделки)")
+            # ── Блок 2: Сквозная воронка по источникам ──────────────────
+            st.subheader("🔽 Сквозная воронка по источникам")
+            st.caption("Показывает сколько сделок из каждого источника дошло до каждой стадии")
+
+            # Матрица: источник × стадия
+            src_stage = (deals_df.groupby(['Источник','Стадия'])
+                         .agg(Сделок=('ID','count'), Сумма=('Сумма','sum'))
+                         .reset_index())
+
+            # Выбор источника для детальной воронки
+            all_sources = sorted(deals_df['Источник'].unique().tolist())
+            sel_src = st.selectbox("Источник для детального просмотра", ["Все"] + all_sources)
+
+            if sel_src != "Все":
+                src_detail = src_stage[src_stage['Источник'] == sel_src].sort_values('Сделок', ascending=False)
+            else:
+                src_detail = (src_stage.groupby('Стадия')
+                              .agg(Сделок=('Сделок','sum'), Сумма=('Сумма','sum'))
+                              .reset_index().sort_values('Сделок', ascending=False))
+
+            col_c, col_d = st.columns(2)
+            with col_c:
+                fig3 = px.bar(src_detail, x='Стадия', y='Сделок',
+                              color='Сделок', color_continuous_scale='Blues',
+                              text='Сделок')
+                fig3.update_traces(textposition='outside')
+                fig3.update_layout(margin=dict(l=0,r=0,t=10,b=60), height=380,
+                                   xaxis_tickangle=-35, title="Количество сделок по стадиям")
+                st.plotly_chart(fig3, use_container_width=True)
+
+            with col_d:
+                fig4 = px.bar(src_detail, x='Стадия', y='Сумма',
+                              color='Сумма', color_continuous_scale='Teal',
+                              text_auto='.3s')
+                fig4.update_layout(margin=dict(l=0,r=0,t=10,b=60), height=380,
+                                   xaxis_tickangle=-35, yaxis_title="₽",
+                                   title="Сумма сделок по стадиям")
+                st.plotly_chart(fig4, use_container_width=True)
+
+            st.divider()
+
+            # ── Блок 3: Тепловая карта источник × стадия ────────────────
+            st.subheader("🗺️ Источник × Стадия (количество сделок)")
+            pivot = (src_stage.pivot_table(index='Источник', columns='Стадия',
+                                           values='Сделок', aggfunc='sum', fill_value=0))
+            # Сортируем источники по общему количеству
+            pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
+
+            fig5 = px.imshow(pivot, text_auto=True, aspect='auto',
+                             color_continuous_scale='Blues',
+                             labels=dict(color="Сделок"))
+            fig5.update_layout(margin=dict(l=0,r=0,t=10,b=0), height=max(300, len(pivot)*35),
+                               xaxis_tickangle=-40)
+            st.plotly_chart(fig5, use_container_width=True)
+
+            st.divider()
+
+            # ── Блок 4: Сводная таблица источник → все этапы ────────────
+            st.subheader("📊 Сводная таблица: конверсия по этапам")
+
+            # Для каждого источника считаем ключевые метрики
+            src_full = src[['Источник','Лидов','Конвертировано','Конверсия_в_сделку_%','Мусор','Мусор_%']].copy()
+
+            deals_by_src = deals_df.groupby('Источник').agg(
+                Сделок=('ID','count'),
+                Успешных=('Успешна','sum'),
+                Провалено=('Провалена','sum'),
+                Активных=('Закрыта', lambda x: (~x).sum()),
+                Выручка=('Сумма', lambda x: deals_df.loc[x.index[deals_df.loc[x.index,'Успешна']],'Сумма'].sum()
+                         if deals_df.loc[x.index,'Успешна'].any() else 0)
+            ).reset_index()
+            deals_by_src['Конверсия_в_успех_%'] = (deals_by_src['Успешных'] / deals_by_src['Сделок'] * 100).round(1)
+
+            full_tbl = src_full.merge(deals_by_src, on='Источник', how='left').fillna(0)
+            full_tbl['Выручка'] = full_tbl['Выручка'].map('{:,.0f} ₽'.format)
+
+            rename_map = {
+                'Конверсия_в_сделку_%': 'Лид→Сделка %',
+                'Мусор_%': 'Мусор %',
+                'Конверсия_в_успех_%': 'Сделка→Успех %'
+            }
+            full_tbl = full_tbl.rename(columns=rename_map)
+            cols_order = ['Источник','Лидов','Мусор','Мусор %','Конвертировано','Лид→Сделка %',
+                          'Сделок','Активных','Успешных','Сделка→Успех %','Провалено','Выручка']
+            full_tbl = full_tbl[[c for c in cols_order if c in full_tbl.columns]]
+            st.dataframe(full_tbl, use_container_width=True, hide_index=True)
+
+            # ── Блок 5: Выручка по источникам ───────────────────────────
+            st.divider()
+            st.subheader("💰 Выручка по источникам")
             won_deals = deals_df[deals_df['Успешна']]
             if not won_deals.empty:
                 src_rev = (won_deals.groupby('Источник')
                            .agg(Сделок=('ID','count'), Выручка=('Сумма','sum'))
                            .reset_index().sort_values('Выручка', ascending=False))
                 src_rev['Средний чек'] = (src_rev['Выручка'] / src_rev['Сделок']).round(0)
-                fig3 = px.bar(src_rev, x='Источник', y='Выручка', text_auto='.3s',
+                fig6 = px.bar(src_rev, x='Источник', y='Выручка', text_auto='.3s',
                               color='Выручка', color_continuous_scale='Teal')
-                fig3.update_layout(margin=dict(l=0,r=0,t=10,b=40), height=300,
+                fig6.update_layout(margin=dict(l=0,r=0,t=10,b=40), height=300,
                                    xaxis_tickangle=-30, yaxis_title="₽")
-                st.plotly_chart(fig3, use_container_width=True)
-                src_rev['Выручка'] = src_rev['Выручка'].map('{:,.0f} ₽'.format)
-                src_rev['Средний чек'] = src_rev['Средний чек'].map('{:,.0f} ₽'.format)
-                st.dataframe(src_rev, use_container_width=True, hide_index=True)
-
-        st.divider()
-        st.subheader("📊 Сводная таблица по источникам")
-        src_display = src.copy()
-        src_display['Сумма_лидов'] = src_display['Сумма_лидов'].map('{:,.0f} ₽'.format)
-        src_display = src_display.rename(columns={'Сумма_лидов': 'Сумма лидов'})
-        st.dataframe(src_display, use_container_width=True, hide_index=True)
+                st.plotly_chart(fig6, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # TAB 4 — МЕНЕДЖЕРЫ
