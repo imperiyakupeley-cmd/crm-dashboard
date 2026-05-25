@@ -454,14 +454,13 @@ with tab5:
         with st.spinner("Проверяю дела по всем активным лидам и сделкам..."):
             today = datetime.now()
             threshold_dt = today + timedelta(days=5)
-            week_start = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%dT00:00:00')
 
             active_l = get_all('crm.lead.list', str({
-                'filter': {'>=DATE_CREATE': week_start, '!STATUS_ID': ['CONVERTED','JUNK']},
+                'filter': {'!STATUS_ID': ['CONVERTED','JUNK']},
                 'select': ['ID','TITLE','ASSIGNED_BY_ID','DATE_CREATE']
             }))
             active_d = get_all('crm.deal.list', str({
-                'filter': {'>=DATE_CREATE': week_start, 'CLOSED': 'N'},
+                'filter': {'CLOSED': 'N'},
                 'select': ['ID','TITLE','ASSIGNED_BY_ID','DATE_CREATE']
             }))
 
